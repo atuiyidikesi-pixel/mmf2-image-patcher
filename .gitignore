@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 逆向工程产物 —— 绝对不要提交任何游戏素材
+*.exe
+*.dll
+*.bin
+*.mfa
+*.ccn
+chunkdump/
+imgbyhandle/
+Dumps/
+redrawn*/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.wav
+*.ogg
+*.mp3
+
+# 例外：文档里若需要示意图，用 docs/images/ 并显式放开
+!docs/images/*.png
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 本地配置
+.env
+*.local
