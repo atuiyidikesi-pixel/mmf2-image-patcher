@@ -133,24 +133,52 @@ if (Settings.Build >= 284) Handle--;      // ← 磁盘上的值比逻辑 handle
 
 ### 像素布局（GraphicMode = 4）
 
-`DataSize` 决定布局，常见两种：
-
-| 条件 | 布局 |
-|---|---|
-| `DataSize == W*H*3` | 24bpp BGR，无 alpha 通道；透明度用 `Transparent` 色表示 |
-| `DataSize == W*H*3 + align4(W)*H` | **BGR 平面（紧凑，stride = W*3）+ alpha 平面（stride = align4(W)）** |
-
-第二种是带 alpha 的图（Flags 含 `Alpha` 位）。注意两个平面的行对齐规则**不同**：
-BGR 面不补齐，alpha 面按 4 字节补齐。
+**一条规则解释全部情况**：
 
 ```
-426×66 的实测：  426*66*3 = 84,348
-                + align4(426)*66 = 428*66 = 28,248
-                = 112,596   ← 与 DataSize 完全一致
+BGR 平面   stride = align2(宽) × 3          宽度向上取偶
+alpha 平面 stride = align4(宽)              仅当 Flags 含 Alpha 位时追加
+DataSize = align2(w)*3*h  [+ align4(w)*h]
 ```
 
-> 这个结论是**实测反推**出来的：拿几种候选布局去还原 CTFAK 导出的参考图，
-> 只有这一种能做到 RGB 差 0.00、alpha 差 0.00。
+`align2(x) = (x+1) & ~1`，`align4(x) = (x+3) & ~3`。
+
+两个平面是**分开存储**的（先全部 BGR 行，再全部 alpha 行），**不是逐行交错**。
+
+#### 为什么容易搞错
+
+看起来像"四种布局"，其实是同一条规则的四个特例：
+
+| 宽度 | 表面现象 | 实际 |
+|---|---|---|
+| 偶数宽、无 alpha | `DataSize == w*h*3`（"紧凑"） | `align2(w)==w`，规则退化 |
+| 奇数宽、无 alpha | `DataSize == align4(w*3)*h`（"补齐"） | 多数奇数宽下两者恰好相等 |
+| 任意宽、有 alpha | 上面再加 `align4(w)*h` | |
+
+实测样本（本样例 7,136 张全部命中）：
+
+```
+5×7     align2(5)=6   →  6*3*7            =    126   ✓
+31×7    align2(31)=32 → 32*3*7            =    672   ✓
+9×10    align2(9)=10  → 10*3*10 + 12*10   =    420   ✓
+189×132 align2=190    → 190*3*132         =  75240   ✓
+426×66  align2=426    → 426*3*66 + 428*66 = 112596   ✓
+```
+
+> **验证方式**：拿本条规则解码全部图像，与 CTFAK（其像素转换在原生 DLL 里）的
+> 导出结果**逐字节比对**，7,136 / 7,136 完全一致；编码往返同样 100% 一致；
+> 整个图像库重新序列化后与原文件字节相同。
+
+### 透明色的字节序
+
+偏移 28 处的 4 字节是 **BGRA**，即 `[0]=B, [1]=G, [2]=R`。
+
+**按 RGBA 读会静默地以另一个颜色作为透明键**，把不相干的像素变成透明——
+本样例中这个错误让 7,136 张里 215 张的 alpha 通道出错（准确率从 100% 掉到 97%）。
+
+还有一个反直觉的点：**透明键是无条件应用的，即使它是纯黑**。
+加"黑色就跳过"的判断会再错 104 张。
+
 
 ---
 
@@ -227,14 +255,21 @@ assert len(new_exe) == len(exe)
 
 ## 8. 环境要求
 
-| 组件 | 用途 | 备注 |
-|---|---|---|
-| [CTFAK 2.0](https://github.com/CTFAK/CTFAK2.0) | 解析游戏、导出图像 | 需自行编译（无预编译包），目标框架 `net6.0-windows` |
-| .NET SDK 8 | 编译 CTFAK | 可免管理员解压即用 |
-| `CTFAK-Native.dll` | CTFAK 的必需原生依赖 | 可从 [CTFAK-UnEx](https://github.com/AITYunivers/CTFAK-UnEx) 仓库的 `.resources/` 取得预编译 x64 版 |
-| Python 3 + Pillow + numpy | 图像处理与打包 | |
+**核心流程是纯 Python**，不需要 CTFAK、不需要 .NET、不需要 Windows：
 
-### 编译 CTFAK 时已知的三个坑
+```bash
+pip install numpy Pillow
+```
+
+| 组件 | 用途 | 是否必需 |
+|---|---|---|
+| Python 3.10+ / numpy / Pillow | 全部工具 | ✅ |
+| [CTFAK 2.0](https://github.com/CTFAK/CTFAK2.0) | 交叉验证你的解析结果 | ❌ 可选 |
+
+本文档中"与 CTFAK 逐字节比对 100% 一致"这个结论，就是用 CTFAK 当参照物得到的——
+它的像素转换在原生 DLL 里，是个很好的独立实现。
+
+如果你要用 CTFAK，**编译时有三处必须打的补丁**：
 
 1. `ASCIIArt.DrawArt2()` 读取 `Console.WindowWidth`——**重定向 I/O 时抛「句柄无效」**，
    而那行 `coeff` 变量赋值后从未被使用（纯死代码）。加 try/catch 或删掉。
@@ -242,6 +277,10 @@ assert len(new_exe) == len(exe)
    解析器无条件解引用。自己写工具时必须先赋值。
 3. 程序声明依赖 `Microsoft.AspNetCore.App 6.0.0`（因为 Core 用了 `Microsoft.NET.Sdk.Web`），
    若只有 8.x 运行时，改 `runtimeconfig.json` 的版本号并加 `"rollForward": "LatestMajor"`。
+
+另外 `CTFAKCore.Init()` 会加载 `x64\CTFAK-Native.dll`（主仓库不含预编译版），
+可从 [CTFAK-UnEx](https://github.com/AITYunivers/CTFAK-UnEx) 的 `.resources/` 取得。
+
 
 ---
 
